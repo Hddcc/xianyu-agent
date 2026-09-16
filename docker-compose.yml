@@ -1,0 +1,16 @@
+services:
+  xianyu-agent:
+    build: .
+    container_name: xianyu-agent
+    restart: always
+    env_file: .env
+    volumes:
+      - ./data:/app/data        # 对话库 + 会话快照，重启不丢
+      - ./.env:/app/.env:ro     # 配置（Cookie 更新后会自动回写，去掉 :ro 可启用回写）
+    environment:
+      - TZ=Asia/Shanghai
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
