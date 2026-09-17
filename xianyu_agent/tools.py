@@ -14,10 +14,13 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from .cancel import CancellationToken
 from .deadline import Deadline
+
+if TYPE_CHECKING:
+    from .pricing import BargainPolicy
 
 
 @dataclass
@@ -33,6 +36,8 @@ class ToolContext:
     notify: Any = None             # 能力层：通知卖家（发图/改价等需人工介入时）
     item: dict | None = None       # 组装上下文时已带上的商品摘要
     floor_note: str = ""           # 卖家自述的议价底线
+    bargain_policy: BargainPolicy | None = None
+    price_reply: str | None = None  # 由报价/改价工具生成，发送端优先使用
 
 
 @dataclass

@@ -94,10 +94,10 @@ async def test_notify_seller_normal():
     async def fake_notify(kind, detail):
         return f"已通知: {kind} {detail}"
 
-    tctx = make_tctx(notify=fake_notify)
+    tctx = make_tctx(notify=fake_notify, item=build_item_description({"soldPrice": 100}))
     result = await tool_by_name("notify_seller").execute(
-        {"kind": "price", "detail": "90元"}, tctx)
-    assert "已通知" in result and "90元" in result
+        {"kind": "price", "price": 90, "detail": "90元"}, tctx)
+    assert "已通知" in result and "买家确认 90 元" in result
 
 
 async def test_notify_seller_deadline():

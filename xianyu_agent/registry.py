@@ -15,13 +15,14 @@ import logging
 import os
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from . import llm
 from .agent import SUMMARY_PROMPT, run_agent
 from .cancel import CancellationToken
 from .deadline import Deadline
 from .kf_tools import build_item_description
+from .pricing import BargainPolicy
 from .session import append_snapshot, session_path
 from .tools import ToolContext
 from .types import Context, IncomingChat, Message
@@ -47,6 +48,7 @@ class AppConfig:
     agent_max_turns: int = 4
     agent_deadline_seconds: float = 30.0
     fallback_reply: str = "稍等哈，我确认下"
+    bargain_policy: BargainPolicy = field(default_factory=BargainPolicy)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -64,6 +66,9 @@ def _env_int(name: str, default: int) -> int:
 
 
 def load_config(myid: str = "me") -> AppConfig:
+    enabled = (os.getenv("BARGAIN_ENABLED", "True") or "True").strip().lower()
+    if enabled not in ("true", "false"):
+        raise ValueError("BARGAIN_ENABLED 必须是 True 或 False")
     return AppConfig(
         myid=myid,
         simulate_typing=os.getenv("SIMULATE_HUMAN_TYPING", "False").lower() == "true",
@@ -71,6 +76,10 @@ def load_config(myid: str = "me") -> AppConfig:
         idle_compact_hours=_env_float("IDLE_COMPACT_HOURS", 12.0),
         agent_max_turns=_env_int("AGENT_MAX_TURNS", 4),
         agent_deadline_seconds=_env_float("AGENT_DEADLINE_SECONDS", 30.0),
+        bargain_policy=BargainPolicy(
+            enabled=enabled == "true",
+            max_discount_percent=os.getenv("BARGAIN_MAX_DISCOUNT_PERCENT") or "10",
+        ),
     )
 
 
@@ -120,12 +129,9 @@ class SessionRegistry:
     # ---------------------------------------------------------------- 内部
 
     async def _ensure_item(self, item_id: str) -> dict | None:
-        """商品信息：缓存优先，未缓存则请求平台接口并落库。"""
+        """每条消息重新读取商品；失败时暂停报价，保留数据库供排查。"""
         if not item_id:
             return None
-        cached = await self.store.get_item_info(item_id)
-        if cached:
-            return cached
         if self.api is None:
             return None
         try:
@@ -133,8 +139,9 @@ class SessionRegistry:
         except Exception:
             logger.exception("获取商品信息失败: %s", item_id)
             return None
-        if "data" in result and "itemDO" in result.get("data", {}):
-            item_info = result["data"]["itemDO"]
+        data = result.get("data") if isinstance(result, dict) else None
+        item_info = data.get("itemDO") if isinstance(data, dict) else None
+        if isinstance(item_info, dict) and item_info:
             await self.store.save_item_info(item_id, item_info)
             logger.info("从平台获取商品信息并缓存: %s", item_id)
             return item_info
@@ -201,7 +208,7 @@ class SessionRegistry:
         cfg = self.config
         chat_id, item_id = chat.chat_id, chat.item_id
 
-        # 1. 商品信息（缓存优先；通道不管这件事）
+        # 1. 最新商品信息（通道不管这件事）
         item_raw = await self._ensure_item(item_id)
         item = build_item_description(item_raw) if item_raw else None
         item_desc = json.dumps(item, ensure_ascii=False) if item else "商品信息暂不可用"
@@ -226,6 +233,10 @@ class SessionRegistry:
         profile = self.experts.get(intent, self.experts["default"])
         bargain_count = await self.store.get_bargain_count(chat_id)
         system_prompt = f"【商品信息】{item_desc}\n{profile.system_prompt}"
+        system_prompt += "\n" + cfg.bargain_policy.prompt(item)
+        floor_note = os.getenv("FLOOR_NOTE", "")
+        if floor_note:
+            system_prompt += f"\n【卖家补充要求】{floor_note}；上述数值价格规则优先。"
         if intent == "price":
             system_prompt += f"\n▲当前议价轮次：{bargain_count}"
 
@@ -247,7 +258,8 @@ class SessionRegistry:
         tctx = ToolContext(
             chat_id=chat_id, item_id=item_id, cancel=signal,
             deadline=deadline, store=self.store, item=item,
-            floor_note=os.getenv("FLOOR_NOTE", ""),
+            floor_note=floor_note,
+            bargain_policy=cfg.bargain_policy,
             search=self._search if self._search_enabled else None,
             notify=self._make_notifier(chat),
         )
@@ -277,6 +289,7 @@ class SessionRegistry:
             return
 
         reply = (final_text or "").strip() or cfg.fallback_reply
+        reply = cfg.bargain_policy.guard_reply(reply, intent, tctx.price_reply)
         safe = safety_filter(reply)
 
         await self.store.add_message(chat_id, cfg.myid, item_id, "assistant", safe)

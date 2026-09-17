@@ -81,6 +81,17 @@ COOKIES_STR=你的闲鱼网页端完整Cookie
 
 闲鱼 Cookie 获取步骤：登录 [闲鱼网页版](https://www.goofish.com) 后打开“消息”，在浏览器开发者工具的 Network → Fetch/XHR 中找到 `h5api.m.goofish.com` 请求，复制完整 Cookie 到 `COOKIES_STR`。Cookie 中需要包含 `unb`、`_m_h5_tk` 等字段。
 
+议价规则在 `.env` 中配置，对所有商品和专家角色统一生效：
+
+```dotenv
+BARGAIN_ENABLED=True
+BARGAIN_MAX_DISCOUNT_PERCENT=10
+```
+
+`BARGAIN_MAX_DISCOUNT_PERCENT` 设置所有商品的累计最大砍价百分比，默认 `10`，取值范围为 `0` 到 `100`。最低允许报价按每个商品的最新标价乘以 `(1 - 百分比 / 100)` 计算，并向上取整到分。例如设置为 `10` 时，标价 100 元最低可报 90 元，标价 1000 元最低可报 900 元。多轮议价共享这一累计上限，每轮都以最新标价为基准。`BARGAIN_ENABLED=False` 表示一口价。`FLOOR_NOTE` 保留为补充话术要求，硬性优惠限制请使用上述百分比配置。旧配置中的 `BARGAIN_MIN_PRICE` 已移除，可从 `.env` 删除。
+
+每次处理买家消息时重新读取平台商品信息，优惠按本次读取的标价计算，历史报价不会覆盖当前规则。金额由 `quote_price` 工具校验并生成回复，改价通知同样校验成交金额。价格读取失败或规格价格不一致时，暂停自动报价，由卖家确认。修改配置后需重启进程。
+
 `.env`、运行数据、密钥文件和其他 Markdown 文档已加入 Git 忽略规则，提交时仅保留本 README 作为项目说明。
 
 ### 3. 先运行终端调试
@@ -117,6 +128,8 @@ docker compose logs -f
 ```
 
 容器将 `data/` 挂载到宿主机，用于保留 SQLite 数据和会话快照。
+
+修改 `.env` 后执行 `docker compose up -d --force-recreate` 以重新加载环境变量；更新代码后执行 `docker compose up -d --build`。
 
 ### 6. 运行测试
 

@@ -7,14 +7,17 @@
 from __future__ import annotations
 
 import json
+import math
 
 from .tools import ToolSpec
+from .pricing import BargainPolicy
 
 
 def format_price(price) -> float:
     """SKU 价格：分转元（原项目逻辑）。"""
     try:
-        return round(float(price) / 100, 2)
+        value = float(price) / 100
+        return round(value, 2) if math.isfinite(value) and value > 0 else 0.0
     except (ValueError, TypeError):
         return 0.0
 
@@ -36,17 +39,22 @@ def build_item_description(item_info: dict) -> dict:
         min_price, max_price = min(valid_prices), max(valid_prices)
         price_display = (f"¥{min_price}" if min_price == max_price
                          else f"¥{min_price} - ¥{max_price}")
+        # 多规格价格不同时，自动报价需要先明确规格。
+        current_price = min_price if min_price == max_price else None
     else:
         try:
             main_price = round(float(item_info.get("soldPrice", 0)), 2)
         except (ValueError, TypeError):
             main_price = 0.0
-        price_display = f"¥{main_price}"
+        current_price = (main_price if math.isfinite(main_price) and main_price > 0
+                         and not isinstance(item_info.get("soldPrice"), bool) else None)
+        price_display = f"¥{current_price}" if current_price is not None else "未知"
 
     return {
         "title": item_info.get("title", ""),
         "desc": item_info.get("desc", ""),
         "price_range": price_display,
+        "price": current_price,
         "total_stock": item_info.get("quantity", 0),
         "sku_details": clean_skus,
     }
@@ -75,10 +83,6 @@ async def _get_item_info(args: dict, tctx) -> str:
     if err:
         return err
     item = tctx.item
-    if item is None and tctx.store is not None:
-        raw = await tctx.store.get_item_info(tctx.item_id)
-        if raw:
-            item = build_item_description(raw)
     if item is None:
         return "error: 商品信息暂不可用，请凭已有信息礼貌回复买家。"
     return (f"商品：{item['title']}\n"
@@ -98,9 +102,26 @@ async def _get_bargain_status(args: dict, tctx) -> str:
         count = await tctx.store.get_bargain_count(tctx.chat_id)
     price = tctx.item["price_range"] if tctx.item else "未知"
     floor = tctx.floor_note or "按系统提示词中的策略执行"
+    policy = tctx.bargain_policy or BargainPolicy()
     return (f"当前会话已进行 {count} 轮议价。\n"
             f"标价 {price}。卖家底线：{floor}。"
+            + "\n" + policy.prompt(tctx.item)
             + _remaining_note(tctx))
+
+
+async def _quote_price(args: dict, tctx) -> str:
+    policy = tctx.bargain_policy or BargainPolicy()
+    tctx.price_reply = policy.fallback_reply()
+    err = _deadline_check(tctx)
+    if err:
+        return err
+    try:
+        price = policy.validate(args.get("price"), tctx.item)
+    except ValueError as e:
+        return f"error: {e}"
+    tctx.price_reply = (f"可以 {price:f} 元，您看怎么样" if policy.enabled
+                       else f"这款一口价 {price:f} 元，暂不接受议价")
+    return f"已验证报价 {price:f} 元。" + _remaining_note(tctx)
 
 
 async def _read_earlier_history(args: dict, tctx) -> str:
@@ -133,14 +154,27 @@ _KIND_ZH = {"image": "买家要看实物图", "price": "买家谈妥需要改价
 
 async def _notify_seller(args: dict, tctx) -> str:
     """AI 做不了的事（发图/改价等），通知卖家人工介入，而不是瞎承诺。"""
+    kind = args.get("kind", "other")
+    if kind == "price":
+        tctx.price_reply = "改价需要卖家确认，请稍等"
     err = _deadline_check(tctx)
     if err:
         return err
     if tctx.notify is None:
         return "error: 通知能力未启用，请诚实回复买家'稍后处理'，不要承诺已经处理好了"
-    kind = args.get("kind", "other")
     detail = args.get("detail", "")
+    if kind == "price":
+        policy = tctx.bargain_policy or BargainPolicy()
+        try:
+            price = policy.validate(args.get("price"), tctx.item)
+        except ValueError as e:
+            tctx.price_reply = policy.fallback_reply()
+            return f"error: {e}"
+        detail = f"买家确认 {price:f} 元，请卖家确认并手动改价"
     result = await tctx.notify(kind, detail)
+    if kind == "price":
+        tctx.price_reply = ("价格已记下，请等待卖家操作" if not result.startswith("error:")
+                           else "改价需要卖家确认，请稍等")
     return result + _remaining_note(tctx)
 
 
@@ -152,6 +186,11 @@ def kf_tools() -> list[ToolSpec]:
         ToolSpec("get_bargain_status",
                  "查看当前会话的议价状态：已进行几轮、卖家底线。",
                  {"type": "object", "properties": {}}, _get_bargain_status),
+        ToolSpec("quote_price",
+                 "向买家报价前必须调用。程序按最新标价、议价开关和累计优惠百分比上限校验，"
+                 "并生成实际发送的报价回复。报价不包含运费或赠品承诺。",
+                 {"type": "object", "properties": {"price": {"type": "number"}},
+                  "required": ["price"]}, _quote_price),
         ToolSpec("read_earlier_history",
                  "读取更早的对话原文。当会话画像里的信息不够时使用。",
                  {"type": "object",
@@ -174,6 +213,8 @@ def kf_tools() -> list[ToolSpec]:
                                "description": "image=要看实物图, price=谈妥需改价, other=其他人工事项"},
                       "detail": {"type": "string",
                                  "description": "补充说明，如买家接受的价格、想看的角度等"},
+                      "price": {"type": "number",
+                                "description": "kind=price 时必填，买家确认的成交金额（元），程序会校验"},
                   },
                   "required": ["kind"]}, _notify_seller),
     ]

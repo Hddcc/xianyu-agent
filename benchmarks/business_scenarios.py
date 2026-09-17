@@ -27,6 +27,7 @@ from xianyu_agent.cancel import CancellationToken
 from xianyu_agent.deadline import Deadline
 from xianyu_agent.experts import load_experts
 from xianyu_agent.kf_tools import build_item_description
+from xianyu_agent.pricing import BargainPolicy
 from xianyu_agent.session import append_snapshot, load_latest
 from xianyu_agent.store import Store
 from xianyu_agent.tools import ToolContext
@@ -105,22 +106,26 @@ async def evaluate_notification(case, state, repeat, store, experts, model):
 
     try:
         item = build_item_description({"title": "蓝牙音箱", "desc": "二手音箱，包装齐全，支持包邮",
-                                       "soldPrice": 399, "quantity": 1})
+                                       "soldPrice": 380, "quantity": 1})
+        policy = BargainPolicy()
         profile = experts["price" if case["kind"] == "price" else "default"]
         history = [Message("user", "348元包邮可以吗？"),
                    Message("assistant", "可以，348元包邮，已经谈妥。")]
         for message in history:
             await store.add_message(chat_id, message.role, "item", message.role, message.content)
         ctx = Context(
-            f"【商品信息】{json.dumps(item, ensure_ascii=False)}\n{profile.system_prompt}",
+            f"【商品信息】{json.dumps(item, ensure_ascii=False)}\n{profile.system_prompt}\n"
+            + policy.prompt(item),
             [*history, Message("user", case["text"])],
             {"chat_id": chat_id, "bargain_count": 4},
         )
         tctx = ToolContext(chat_id=chat_id, item_id="item", item=item,
                            store=store, cancel=CancellationToken(), notify=notification,
+                           bargain_policy=policy,
                            deadline=Deadline(seconds=75, max_turns=4))
         reply, stop, events = await asyncio.wait_for(
             agent_reply(ctx, profile, tctx, model), timeout=90)
+        reply = policy.guard_reply(reply, profile.name, tctx.price_reply)
         matching = [entry for entry in notifications if entry["kind"] == case["kind"]]
         amount_ok = "amount" not in case or any(
             case["amount"] in re.findall(r"\d+(?:\.\d+)?", entry["detail"])
