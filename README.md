@@ -12,6 +12,15 @@
 - **可持续的会话记忆**：SQLite 保存消息、商品缓存和会话画像，JSONL 快照记录每次 Agent 决策现场。
 - **闲鱼通道能力**：支持 token 刷新、心跳保活、断线重连、人工接管和拟人化输入延迟。
 
+## 实际对话
+
+闲鱼实际议价对话，按顺序展示：
+
+<p>
+  <img src="assets/chat-example-1.jpg" alt="闲鱼实际议价对话：首轮报价与逐步让价" width="360" />
+  <img src="assets/chat-example-2.jpg" alt="闲鱼实际议价对话：后续议价与等待卖家操作" width="360" />
+</p>
+
 ## 架构概览
 
 ```text
