@@ -93,14 +93,14 @@ async def test_old_offer_is_blocked_after_repricing(tmp_path, monkeypatch, inten
     await registry.store.add_message("c1", "seller", "item-1", "assistant", "95元可以")
 
     async def stream(ctx, **kwargs):
-        assert "1000" in ctx.system_prompt and "900" in ctx.system_prompt
+        assert "1000" in ctx.system_prompt and "950" in ctx.system_prompt
         assert "历史" in ctx.system_prompt
         yield {"type": "text_delta", "delta": "95元包邮可以吗"}
         yield {"type": "done", "stopReason": "end_turn"}
 
     monkeypatch.setattr(llm, "stream", stream)
     await registry.handle(incoming("c1", "80出吗", "item-1"))
-    assert "95" not in sent[0][2]
+    assert "95元包邮" not in sent[0][2]
     assert (await registry.store.get_context_by_chat("c1"))[-1]["content"] == sent[0][2]
 
 
@@ -109,7 +109,7 @@ async def test_structured_quote_controls_reply_and_cumulative_discount(tmp_path,
     registry.router.classify_llm = lambda *args: "price"
     registry.api = SimpleNamespace(
         get_item_info=lambda _: {"data": {"itemDO": {"soldPrice": 1000}}})
-    proposed = [900, 810]
+    proposed = [950, 925]
     feedback = []
 
     async def stream(ctx, **kwargs):
@@ -127,9 +127,9 @@ async def test_structured_quote_controls_reply_and_cumulative_discount(tmp_path,
     monkeypatch.setattr(llm, "stream", stream)
     await registry.handle(incoming("c1", "能优惠吗", "item-1"))
     await registry.handle(incoming("c1", "还能少点吗", "item-1"))
-    assert "900" in sent[0][2] and "80" not in sent[0][2]
-    assert feedback[1].startswith("error:")
-    assert "810" not in sent[1][2] and "80" not in sent[1][2]
+    assert sent == [("c1", "buyer-c1", "可以 950 元，您看怎么样"),
+                    ("c1", "buyer-c1", "可以 925 元，您看怎么样")]
+    assert all(not result.startswith("error:") for result in feedback)
 
 
 @pytest.mark.parametrize("reply", ["95元可以", "九十五元包邮", "95包邮", "可以打八折"])
@@ -192,7 +192,7 @@ async def test_percent_policy_uses_each_items_latest_price(tmp_path, monkeypatch
     prices = {"cheap": 100, "expensive": 1000}
     registry.api = SimpleNamespace(
         get_item_info=lambda item_id: {"data": {"itemDO": {"soldPrice": prices[item_id]}}})
-    offers = iter([90, 900, 180, 179.99])
+    offers = iter([95, 950, 185, 180])
     feedback = []
 
     async def stream(ctx, **kwargs):
@@ -214,11 +214,13 @@ async def test_percent_policy_uses_each_items_latest_price(tmp_path, monkeypatch
     await registry.handle(incoming("c1", "现在呢", "cheap"))
     await registry.handle(incoming("c1", "再少点", "cheap"))
     assert [entry[2] for entry in sent] == [
-        "可以 90 元，您看怎么样", "可以 900 元，您看怎么样",
-        "可以 180 元，您看怎么样", "价格需要卖家确认，请稍等",
+        "可以 95 元，您看怎么样", "可以 950 元，您看怎么样",
+        "可以 185 元，您看怎么样", "可以 180 元，您看怎么样",
     ]
-    assert all(not result.startswith("error:") for result in feedback[:3])
-    assert feedback[-1].startswith("error:")
+    assert feedback[0].startswith("已验证报价")
+    assert feedback[1].startswith("已验证报价")
+    assert feedback[2].startswith("已验证报价")
+    assert feedback[3].startswith("已验证报价")
 
 
 async def test_price_rounding_does_not_exceed_discount_limit():
@@ -227,6 +229,60 @@ async def test_price_rounding_does_not_exceed_discount_limit():
     assert tctx.bargain_policy.minimum(tctx.item) == Decimal("30.00")
     assert (await tool("quote_price").execute({"price": 29.99}, tctx)).startswith("error:")
     assert not (await tool("quote_price").execute({"price": 30}, tctx)).startswith("error:")
+
+
+def test_progressive_discount_uses_current_bargain_round():
+    policy = BargainPolicy()
+    item = build_item_description({"soldPrice": 1000})
+    assert policy.minimum(item, 0) == Decimal("950.00")
+    assert policy.minimum(item, 1) == Decimal("925.00")
+    assert policy.minimum(item, 2) == Decimal("900.00")
+    assert policy.minimum(item, 5) == Decimal("900.00")
+
+
+async def test_numeric_price_message_requires_quote_tool(tmp_path, monkeypatch):
+    registry, sent = make_registry(tmp_path, monkeypatch)
+    registry.router.classify_llm = lambda *args: "price"
+    registry.api = SimpleNamespace(
+        get_item_info=lambda _: {"data": {"itemDO": {"soldPrice": 1000}}})
+    choices = []
+
+    async def stream(ctx, **kwargs):
+        choices.append(kwargs.get("tool_choice"))
+        yield {"type": "text_delta", "delta": "500元可以"}
+        yield {"type": "done", "stopReason": "end_turn"}
+
+    monkeypatch.setattr(llm, "stream", stream)
+    await registry.handle(incoming("c1", "500出吗", "item-1"))
+
+    assert choices[0] == {"type": "function", "function": {"name": "quote_price"}}
+    assert sent == [("c1", "buyer-c1", "目前最低 950.00 元，您看可以吗")]
+
+
+async def test_over_limit_quote_returns_progressive_counter_offer(tmp_path, monkeypatch):
+    registry, sent = make_registry(tmp_path, monkeypatch)
+    registry.router.classify_llm = lambda *args: "price"
+    registry.api = SimpleNamespace(
+        get_item_info=lambda _: {"data": {"itemDO": {"soldPrice": 1000}}})
+    feedback = []
+
+    async def stream(ctx, **kwargs):
+        results = [b for m in ctx.messages if isinstance(m.content, list)
+                   for b in m.content if isinstance(b, ToolResultBlock)]
+        if not results:
+            yield {"type": "tool_call", "id": "quote", "name": "quote_price",
+                   "args": {"price": 800}}
+            yield {"type": "done", "stopReason": "tool_use"}
+        else:
+            feedback.append(results[-1].content)
+            yield {"type": "text_delta", "delta": "这个价格可以吗"}
+            yield {"type": "done", "stopReason": "end_turn"}
+
+    monkeypatch.setattr(llm, "stream", stream)
+    await registry.handle(incoming("c1", "800出吗", "item-1"))
+
+    assert feedback[0].startswith("error:")
+    assert sent == [("c1", "buyer-c1", "目前最低 950.00 元，您看可以吗")]
 
 
 @pytest.mark.parametrize("price", [None, 0, -1, "NaN", "Infinity", "invalid"])

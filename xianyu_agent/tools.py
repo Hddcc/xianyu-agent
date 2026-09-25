@@ -37,6 +37,7 @@ class ToolContext:
     item: dict | None = None       # 组装上下文时已带上的商品摘要
     floor_note: str = ""           # 卖家自述的议价底线
     bargain_policy: BargainPolicy | None = None
+    bargain_count: int | None = None
     price_reply: str | None = None  # 由报价/改价工具生成，发送端优先使用
 
 

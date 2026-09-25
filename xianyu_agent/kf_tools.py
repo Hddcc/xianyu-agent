@@ -105,7 +105,7 @@ async def _get_bargain_status(args: dict, tctx) -> str:
     policy = tctx.bargain_policy or BargainPolicy()
     return (f"当前会话已进行 {count} 轮议价。\n"
             f"标价 {price}。卖家底线：{floor}。"
-            + "\n" + policy.prompt(tctx.item)
+            + "\n" + policy.prompt(tctx.item, tctx.bargain_count)
             + _remaining_note(tctx))
 
 
@@ -116,8 +116,18 @@ async def _quote_price(args: dict, tctx) -> str:
     if err:
         return err
     try:
-        price = policy.validate(args.get("price"), tctx.item)
+        price = policy.validate(args.get("price"), tctx.item, tctx.bargain_count)
     except ValueError as e:
+        try:
+            proposed_raw = args.get("price")
+            if isinstance(proposed_raw, bool):
+                raise ValueError
+            proposed = float(proposed_raw)
+            minimum = policy.minimum(tctx.item, tctx.bargain_count)
+            if proposed < float(minimum):
+                tctx.price_reply = policy.counter_reply(tctx.item, tctx.bargain_count)
+        except (TypeError, ValueError):
+            pass
         return f"error: {e}"
     tctx.price_reply = (f"可以 {price:f} 元，您看怎么样" if policy.enabled
                        else f"这款一口价 {price:f} 元，暂不接受议价")
@@ -166,9 +176,9 @@ async def _notify_seller(args: dict, tctx) -> str:
     if kind == "price":
         policy = tctx.bargain_policy or BargainPolicy()
         try:
-            price = policy.validate(args.get("price"), tctx.item)
+            price = policy.validate(args.get("price"), tctx.item, tctx.bargain_count)
         except ValueError as e:
-            tctx.price_reply = policy.fallback_reply()
+            tctx.price_reply = policy.counter_reply(tctx.item, tctx.bargain_count)
             return f"error: {e}"
         detail = f"买家确认 {price:f} 元，请卖家确认并手动改价"
     result = await tctx.notify(kind, detail)

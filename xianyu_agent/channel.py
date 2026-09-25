@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -72,6 +73,8 @@ class XianyuChannel:
 
         # 消息过期
         self.message_expire_time = int(os.getenv("MESSAGE_EXPIRE_TIME", "300000"))
+        self.message_dedup_time = int(os.getenv("MESSAGE_DEDUP_TIME", "300000"))
+        self._seen_message_keys: dict[str, float] = {}
 
         self.ws = None
 
@@ -345,6 +348,18 @@ class XianyuChannel:
     def _check_toggle_keywords(self, message: str) -> bool:
         return message.strip() == self.toggle_keywords
 
+    def _is_duplicate_message(self, key: str) -> bool:
+        now = time.time() * 1000
+        cutoff = now - self.message_dedup_time
+        self._seen_message_keys = {
+            seen_key: seen_at for seen_key, seen_at in self._seen_message_keys.items()
+            if seen_at >= cutoff
+        }
+        if key in self._seen_message_keys:
+            return True
+        self._seen_message_keys[key] = now
+        return False
+
     # ---------------------------------------------------------------- 人工接管
 
     def _is_manual_mode(self, chat_id: str) -> bool:
@@ -441,6 +456,15 @@ class XianyuChannel:
 
             if not item_id:
                 logger.warning("无法获取商品ID")
+                return
+
+            message_key = hashlib.sha256(
+                "\x1f".join((chat_id, str(send_user_id), item_id,
+                             str(create_time), send_message)).encode("utf-8")
+            ).hexdigest()
+            if self._is_duplicate_message(message_key):
+                logger.info("重复聊天消息，跳过处理 (会话: %s, 时间: %s)",
+                            chat_id, create_time)
                 return
 
             chat = IncomingChat(chat_id=chat_id, item_id=item_id,

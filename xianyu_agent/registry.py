@@ -22,7 +22,7 @@ from .agent import SUMMARY_PROMPT, run_agent
 from .cancel import CancellationToken
 from .deadline import Deadline
 from .kf_tools import build_item_description
-from .pricing import BargainPolicy
+from .pricing import BargainPolicy, has_numeric_offer
 from .session import append_snapshot, session_path
 from .tools import ToolContext
 from .types import Context, IncomingChat, Message
@@ -233,7 +233,7 @@ class SessionRegistry:
         profile = self.experts.get(intent, self.experts["default"])
         bargain_count = await self.store.get_bargain_count(chat_id)
         system_prompt = f"【商品信息】{item_desc}\n{profile.system_prompt}"
-        system_prompt += "\n" + cfg.bargain_policy.prompt(item)
+        system_prompt += "\n" + cfg.bargain_policy.prompt(item, bargain_count)
         floor_note = os.getenv("FLOOR_NOTE", "")
         if floor_note:
             system_prompt += f"\n【卖家补充要求】{floor_note}；上述数值价格规则优先。"
@@ -262,7 +262,11 @@ class SessionRegistry:
             bargain_policy=cfg.bargain_policy,
             search=self._search if self._search_enabled else None,
             notify=self._make_notifier(chat),
+            bargain_count=bargain_count,
         )
+        ctx.meta["require_quote"] = intent == "price" and has_numeric_offer(chat.text)
+        if ctx.meta["require_quote"]:
+            logger.info("[会话 %s] 检测到数字报价，首轮要求调用 quote_price", chat_id)
 
         final_text, stop_reason = "", "end_turn"
         try:
@@ -289,7 +293,13 @@ class SessionRegistry:
             return
 
         reply = (final_text or "").strip() or cfg.fallback_reply
-        reply = cfg.bargain_policy.guard_reply(reply, intent, tctx.price_reply)
+        logger.info("[会话 %s] 回复收尾: stop_reason=%s, price_reply=%r, final_text=%r",
+                    chat_id, stop_reason, tctx.price_reply, final_text)
+        reply = cfg.bargain_policy.guard_reply(
+            reply, intent, tctx.price_reply, item=item,
+            bargain_count=bargain_count,
+            offer_detected=has_numeric_offer(chat.text),
+        )
         safe = safety_filter(reply)
 
         await self.store.add_message(chat_id, cfg.myid, item_id, "assistant", safe)

@@ -121,7 +121,8 @@ def build_tool_result_message(results: list[dict]) -> Message:
 
 async def stream(ctx: Context, tools: list[dict] | None = None, signal=None,
                  model: ModelConfig | None = None, *,
-                 temperature: float = 0.7, max_tokens: int = 500, top_p: float = 0.8):
+                 temperature: float = 0.7, max_tokens: int = 500, top_p: float = 0.8,
+                 tool_choice=None):
     """异步生成器，逐个产出流式事件。
 
     事件只有四种：text_delta / tool_call / done。
@@ -140,6 +141,8 @@ async def stream(ctx: Context, tools: list[dict] | None = None, signal=None,
                                        "description": t["description"],
                                        "parameters": t["parameters"]}}
                          for t in tools]
+    if tool_choice is not None:
+        body["tool_choice"] = tool_choice
 
     finish = None
     try:

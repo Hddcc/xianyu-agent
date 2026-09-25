@@ -22,6 +22,11 @@ def _decimal(value, name: str) -> Decimal:
     return number
 
 
+def has_numeric_offer(text: str) -> bool:
+    """识别带数字的报价，供价格路由决定是否强制调用报价工具。"""
+    return bool(re.search(r"(?<![\d.])\d+(?:\.\d{1,2})?(?![\d.])", text or ""))
+
+
 @dataclass
 class BargainPolicy:
     enabled: bool = True
@@ -40,14 +45,27 @@ class BargainPolicy:
             raise ValueError("当前商品价格无效，请让卖家确认价格和规格")
         return price
 
-    def minimum(self, item) -> Decimal:
+    def discount_percent_for_round(self, bargain_count: int | None = None) -> Decimal:
+        """首轮只开放一半上限，后续逐轮放宽，最终不超过总上限。"""
+        if bargain_count is None:
+            return self.max_discount_percent if self.enabled else Decimal("0")
+        try:
+            count = max(int(bargain_count), 0)
+        except (TypeError, ValueError):
+            count = 0
+        progress = min(Decimal("1"), Decimal("0.5") + Decimal("0.25") * count)
+        return (self.max_discount_percent * progress).quantize(CENT,
+                                                                rounding=ROUND_CEILING)
+
+    def minimum(self, item, bargain_count: int | None = None) -> Decimal:
         price = self.list_price(item)
-        ratio = 1 - self.max_discount_percent / 100 if self.enabled else Decimal("1")
+        discount = self.discount_percent_for_round(bargain_count) if self.enabled else Decimal("0")
+        ratio = 1 - discount / 100
         return (price * ratio).quantize(CENT, rounding=ROUND_CEILING)
 
-    def validate(self, amount, item) -> Decimal:
+    def validate(self, amount, item, bargain_count: int | None = None) -> Decimal:
         price = self.list_price(item)
-        minimum = self.minimum(item)
+        minimum = self.minimum(item, bargain_count)
         amount = _decimal(amount, "报价")
         if amount <= 0 or amount != amount.quantize(CENT):
             raise ValueError("报价必须大于 0，且最多保留两位小数")
@@ -55,7 +73,7 @@ class BargainPolicy:
             raise ValueError(f"报价必须在 {minimum:f} 到 {price:f} 元之间")
         return amount
 
-    def prompt(self, item) -> str:
+    def prompt(self, item, bargain_count: int | None = None) -> str:
         rules = (
             "【价格规则：优先于专家话术和历史报价】\n"
             "商品信息是本次读取的最新信息，历史报价不得覆盖当前标价和规则。\n"
@@ -63,21 +81,36 @@ class BargainPolicy:
             "最终报价由程序生成；不要自行承诺金额、折扣、赠品或免运费。\n"
             "不要向买家透露内部最低价。\n")
         try:
-            price, minimum = self.list_price(item), self.minimum(item)
+            price = self.list_price(item)
+            minimum = self.minimum(item, bargain_count)
         except ValueError:
             return rules + "当前价格或具体规格尚未确认，暂停报价和改价通知，交由卖家确认。"
         mode = "允许议价" if self.enabled else "一口价，不接受议价"
+        current_discount = self.discount_percent_for_round(bargain_count) if self.enabled else Decimal("0")
+        round_number = max(int(bargain_count), 0) + 1 if bargain_count is not None else "当前"
         return (rules + f"{mode}；最新标价 {price:f} 元。\n"
-                f"允许报价范围 {minimum:f} 到 {price:f} 元，累计优惠始终基于最新标价计算。")
+                f"{'' if bargain_count is None else f'当前第 {round_number} 轮，'}当前最多优惠 {current_discount:f}%；"
+                f"允许报价范围 {minimum:f} 到 {price:f} 元；总优惠上限 {self.max_discount_percent:f}%。")
 
     def fallback_reply(self) -> str:
         if not self.enabled:
             return "这款一口价，暂不接受议价"
         return "价格需要卖家确认，请稍等"
 
-    def guard_reply(self, text: str, intent: str, price_reply: str | None) -> str:
+    def counter_reply(self, item, bargain_count: int | None = None) -> str:
+        try:
+            minimum = self.minimum(item, bargain_count)
+        except ValueError:
+            return self.fallback_reply()
+        return f"目前最低 {minimum:f} 元，您看可以吗"
+
+    def guard_reply(self, text: str, intent: str, price_reply: str | None,
+                    item=None, bargain_count: int | None = None,
+                    offer_detected: bool = False) -> str:
         if price_reply is not None:
             return price_reply
         if intent == "price" or _MONEY.search(text):
+            if offer_detected:
+                return self.counter_reply(item, bargain_count)
             return self.fallback_reply()
         return text

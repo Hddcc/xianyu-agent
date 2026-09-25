@@ -76,9 +76,14 @@ async def run_agent(ctx, tools, tool_context, signal, *,
 
         # 1. 问模型
         text, tool_calls, stop = "", [], "end_turn"
+        tool_choice = None
+        if turn == 1 and ctx.meta.get("require_quote") and "quote_price" in tool_map:
+            tool_choice = {"type": "function",
+                           "function": {"name": "quote_price"}}
         async for ev in llm.stream(ctx, tools=tool_defs, signal=signal, model=model,
                                    temperature=temperature,
-                                   max_tokens=max_tokens, top_p=top_p):
+                                   max_tokens=max_tokens, top_p=top_p,
+                                   tool_choice=tool_choice):
             if ev["type"] == "text_delta":
                 text += ev["delta"]
                 yield {"type": "assistant_text", "delta": ev["delta"]}

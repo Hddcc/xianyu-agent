@@ -54,8 +54,8 @@ async def test_notification_result_reaches_model_and_preserves_recipient(
                 "web_search", "notify_seller", "quote_price",
             }
             yield {"type": "tool_call", "id": "notify-1", "name": "notify_seller",
-                   "args": {"kind": kind, "price": 90,
-                            "detail": "agreed amount 90; photo angle front"}}
+                   "args": {"kind": kind, "price": 95,
+                            "detail": "agreed amount 95; photo angle front"}}
             yield {"type": "done", "stopReason": "tool_use"}
 
     monkeypatch.setattr(llm, "stream", stream)
@@ -74,9 +74,9 @@ async def test_notification_result_reaches_model_and_preserves_recipient(
         assert "buyer-c1" in content and "item-1" in content
         assert "c1" in content
         if kind == "price":
-            assert "买家确认 90 元，请卖家确认并手动改价" in content
+            assert "买家确认 95 元，请卖家确认并手动改价" in content
         else:
-            assert "agreed amount 90; photo angle front" in content
+            assert "agreed amount 95; photo angle front" in content
 
 
 @pytest.mark.parametrize("kind", ["image", "price"])
