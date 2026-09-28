@@ -7,7 +7,7 @@ from xianyu_agent.store import Store
 from xianyu_agent.types import IncomingChat
 
 
-def make_registry(tmp_path, monkeypatch, **config_overrides):
+def make_registry(tmp_path, monkeypatch, event_sink=None, **config_overrides):
     monkeypatch.chdir(tmp_path)
     model = ModelConfig("offline-test", "https://unused.invalid/v1", "unused")
     experts = {name: ExpertProfile(name, "Test customer service agent.")
@@ -17,12 +17,13 @@ def make_registry(tmp_path, monkeypatch, **config_overrides):
     async def capture(chat_id, to_user_id, text):
         sent.append((chat_id, to_user_id, text))
 
-    config = AppConfig(myid="seller", idle_compact_hours=0,
-                       **config_overrides)
+    config_values = {"myid": "seller", "idle_compact_hours": 0}
+    config_values.update(config_overrides)
+    config = AppConfig(**config_values)
     registry = SessionRegistry(
         Store(str(tmp_path / "history.db"), max_history=1000), experts,
         IntentRouter(lambda user, item, history: "default"),
-        Models(model, model), config, sender=capture,
+        Models(model, model), config, sender=capture, event_sink=event_sink,
     )
     return registry, sent
 

@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import time
+from uuid import uuid4
 
 import websockets
 
@@ -388,6 +389,11 @@ class XianyuChannel:
 
     # ---------------------------------------------------------------- 消息处理
 
+    def _record_event(self, event_type: str, **fields) -> None:
+        recorder = getattr(self.dispatcher, "record_event", None)
+        if recorder is not None:
+            recorder(event_type, **fields)
+
     async def _handle_raw(self, message_data: dict, ws):
         """处理一条原始消息：解密、过滤、分拣。"""
         try:
@@ -443,19 +449,23 @@ class XianyuChannel:
             send_user_name = message["1"]["10"]["reminderTitle"]
             send_user_id = message["1"]["10"]["senderUserId"]
             send_message = message["1"]["10"]["reminderContent"]
+            chat_id = message["1"]["2"].split("@")[0]
+            run_id = uuid4().hex
 
             # 时效性验证（过滤过期消息）
             if time.time() * 1000 - create_time > self.message_expire_time:
                 logger.debug("过期消息丢弃")
+                self._record_event("message_filtered", run_id=run_id, chat_id=chat_id,
+                                   reason="expired", input=send_message)
                 return
 
             url_info = message["1"]["10"]["reminderUrl"]
             item_id = (url_info.split("itemId=")[1].split("&")[0]
                        if "itemId=" in url_info else None)
-            chat_id = message["1"]["2"].split("@")[0]
-
             if not item_id:
                 logger.warning("无法获取商品ID")
+                self._record_event("message_filtered", run_id=run_id, chat_id=chat_id,
+                                   reason="missing_item_id", input=send_message)
                 return
 
             message_key = hashlib.sha256(
@@ -465,6 +475,10 @@ class XianyuChannel:
             if self._is_duplicate_message(message_key):
                 logger.info("重复聊天消息，跳过处理 (会话: %s, 时间: %s)",
                             chat_id, create_time)
+                self._record_event("message_filtered", run_id=run_id,
+                                   chat_id=chat_id, item_id=item_id,
+                                   reason="duplicate", message_key=message_key,
+                                   input=send_message)
                 return
 
             chat = IncomingChat(chat_id=chat_id, item_id=item_id,
@@ -481,8 +495,14 @@ class XianyuChannel:
                     else:
                         logger.info("🟢 已恢复会话 %s 的自动回复 (商品: %s)",
                                     chat_id, item_id)
+                    self._record_event("manual_mode_changed", run_id=run_id,
+                                       chat_id=chat_id,
+                                       item_id=item_id, mode=mode)
                     return
                 await self.dispatcher.record_manual_reply(chat, role="assistant")
+                self._record_event("message_filtered", run_id=run_id,
+                                   chat_id=chat_id, item_id=item_id,
+                                   reason="seller_reply", input=send_message)
                 return
 
             logger.info("买家: %s (ID: %s), 商品: %s, 会话: %s, 消息: %s",
@@ -492,17 +512,29 @@ class XianyuChannel:
             if self._is_manual_mode(chat_id):
                 logger.info("🔴 会话 %s 处于人工接管模式，跳过自动回复", chat_id)
                 await self.dispatcher.record_manual_reply(chat, role="user")
+                self._record_event("message_filtered", run_id=run_id,
+                                   chat_id=chat_id, item_id=item_id,
+                                   reason="manual_mode", input=send_message)
                 return
 
             # 系统消息过滤
             if self._is_bracket_system_message(send_message):
                 logger.info("检测到系统消息 '%s'，跳过自动回复", send_message)
+                self._record_event("message_filtered", run_id=run_id,
+                                   chat_id=chat_id, item_id=item_id,
+                                   reason="system_message", input=send_message)
                 return
             if self._is_system_message(message):
                 logger.debug("系统消息，跳过处理")
+                self._record_event("message_filtered", run_id=run_id,
+                                   chat_id=chat_id, item_id=item_id,
+                                   reason="system_message", input=send_message)
                 return
 
             # 进内核，通道到此为止
-            await self.dispatcher.handle(chat)
+            self._record_event("message_accepted", run_id=run_id,
+                               chat_id=chat_id, item_id=item_id,
+                               message_key=message_key, input=send_message)
+            await self.dispatcher.handle(chat, run_id=run_id, message_key=message_key)
         except Exception:
             logger.exception("处理消息时发生错误")
