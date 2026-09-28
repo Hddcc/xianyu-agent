@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import inspect
 import logging
+import time
 
 from . import llm
 from .cancel import Cancelled
 from .types import Context, Message
+from .telemetry import emit
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +71,7 @@ async def run_agent(ctx, tools, tool_context, signal, *,
         if deadline is not None and deadline.expired:
             yield {"type": "turn_end", "stopReason": "deadline", "text": last_text}
             return
-        await maybe_compact(ctx, signal, model=model)
+        await maybe_compact(ctx, signal, model=model, event_sink=tool_context.emit)
 
         turn += 1
         ctx.meta["turn"] = turn
@@ -80,6 +82,11 @@ async def run_agent(ctx, tools, tool_context, signal, *,
         if turn == 1 and ctx.meta.get("require_quote") and "quote_price" in tool_map:
             tool_choice = {"type": "function",
                            "function": {"name": "quote_price"}}
+        model_started = time.monotonic()
+        emit(tool_context.emit, "model_call_started", kind="reply", turn=turn,
+             model=getattr(model, "name", None), context_messages=len(ctx.messages))
+        usage = None
+        error_message = None
         async for ev in llm.stream(ctx, tools=tool_defs, signal=signal, model=model,
                                    temperature=temperature,
                                    max_tokens=max_tokens, top_p=top_p,
@@ -89,10 +96,18 @@ async def run_agent(ctx, tools, tool_context, signal, *,
                 yield {"type": "assistant_text", "delta": ev["delta"]}
             elif ev["type"] == "tool_call":
                 tool_calls.append(ev)
+                emit(tool_context.emit, "tool_requested", turn=turn,
+                     tool_call_id=ev["id"], name=ev["name"], args=ev["args"])
                 yield {"type": "tool_call", "id": ev["id"],
                        "name": ev["name"], "args": ev["args"]}
             elif ev["type"] == "done":
                 stop = ev["stopReason"]
+                usage = ev.get("usage")
+                error_message = ev.get("message")
+        emit(tool_context.emit, "model_call_finished", kind="reply", turn=turn,
+             model=getattr(model, "name", None), stop_reason=stop, usage=usage,
+             error=error_message,
+             duration_ms=round((time.monotonic() - model_started) * 1000, 3))
 
         if text:
             last_text = text        # 多轮时，最终回复取最后一轮的文字
@@ -114,6 +129,10 @@ async def run_agent(ctx, tools, tool_context, signal, *,
             return
         if stop == "max_tokens" and tool_calls:
             # 意外一：长度截断。残缺的参数可能拼出错误的报价，一个都不执行
+            for tc in tool_calls:
+                emit(tool_context.emit, "tool_finished", turn=turn,
+                     tool_call_id=tc["id"], name=tc["name"], status="rejected",
+                     error="max_tokens", duration_ms=0.0)
             ctx.messages.append(build_tool_result_message([
                 {"tool_use_id": tc["id"], "is_error": True,
                  "content": "error: 输出被长度上限截断，参数可能不完整，请重新完整发起一次调用。"}
@@ -128,29 +147,53 @@ async def run_agent(ctx, tools, tool_context, signal, *,
         # 4. 执行工具
         results = []
         aborted = False
+        finished_tool_ids = set()
         for tc in tool_calls:
             if signal.cancelled or (deadline is not None and deadline.expired):
                 aborted = True
                 break
             spec = tool_map.get(tc["name"])
+            tool_started = time.monotonic()
+            emit(tool_context.emit, "tool_started", turn=turn, tool_call_id=tc["id"],
+                 name=tc["name"], args=tc["args"])
+            tool_error = None
             if spec is None:
                 content = f"error: 没有名为 \"{tc['name']}\" 的工具"
+                tool_error = "unknown_tool"
             else:
                 try:
                     signal.raise_if_cancelled()
                     content = await _maybe_await(spec.execute(tc["args"], tool_context))
                 except Cancelled:
+                    emit(tool_context.emit, "tool_finished", turn=turn,
+                         tool_call_id=tc["id"], name=tc["name"], status="aborted",
+                         error="cancelled",
+                         duration_ms=round((time.monotonic() - tool_started) * 1000, 3))
+                    finished_tool_ids.add(tc["id"])
                     aborted = True
                     break
                 except Exception as e:
                     logger.exception("工具 %s 执行失败", tc["name"])
                     content = f"error: {type(e).__name__}: {e}"
+                    tool_error = type(e).__name__
+            if tool_error is None and str(content).startswith("error:"):
+                tool_error = "tool_result_error"
             results.append({"tool_use_id": tc["id"], "content": content})
+            emit(tool_context.emit, "tool_finished", turn=turn, tool_call_id=tc["id"],
+                 name=tc["name"], status="error" if tool_error else "success",
+                 error=tool_error,
+                 duration_ms=round((time.monotonic() - tool_started) * 1000, 3))
+            finished_tool_ids.add(tc["id"])
             yield {"type": "tool_result", "id": tc["id"],
                    "name": tc["name"], "result": content}
 
         # 配对补齐：每个工具调用都必须有对应的结果，否则下次发出去接口直接报错
         for tc in tool_calls[len(results):]:
+            if tc["id"] not in finished_tool_ids:
+                reason = "cancelled" if signal.cancelled else "deadline"
+                emit(tool_context.emit, "tool_finished", turn=turn,
+                     tool_call_id=tc["id"], name=tc["name"], status="aborted",
+                     error=reason, duration_ms=0.0)
             results.append({"tool_use_id": tc["id"], "content": "error: aborted",
                             "is_error": True})
 
@@ -168,7 +211,7 @@ async def run_agent(ctx, tools, tool_context, signal, *,
 
 # ---------------------------------------------------------------- 压缩
 
-async def maybe_compact(ctx: Context, signal, model=None) -> bool:
+async def maybe_compact(ctx: Context, signal, model=None, event_sink=None) -> bool:
     """消息太多就压。中断时跳过——半截摘要比不压缩更危险。"""
     if len(ctx.messages) < COMPACT_THRESHOLD:
         return False
@@ -184,11 +227,35 @@ async def maybe_compact(ctx: Context, signal, model=None) -> bool:
     sub = Context(system_prompt=SUMMARY_PROMPT,
                   messages=[Message(role="user", content=_render(old))])
     summary = ""
-    async for ev in llm.stream(sub, signal=signal, model=model):
-        if ev["type"] == "text_delta":
-            summary += ev["delta"]
+    stop_reason = "missing"
+    started = time.monotonic()
+    emit(event_sink, "context_compaction_started", messages_before=len(ctx.messages),
+         messages_to_summarize=len(old))
+    try:
+        async for ev in llm.stream(sub, signal=signal, model=model):
+            if ev["type"] == "text_delta":
+                summary += ev["delta"]
+            elif ev["type"] == "done":
+                stop_reason = ev["stopReason"]
+    except Exception as exc:
+        emit(event_sink, "context_compaction_finished", status="error",
+             stop_reason="exception", error=type(exc).__name__,
+             messages_before=len(ctx.messages), messages_after=len(ctx.messages),
+             duration_ms=round((time.monotonic() - started) * 1000, 3))
+        raise
+
+    if stop_reason != "end_turn" or not summary.strip() or (signal and signal.cancelled):
+        emit(event_sink, "context_compaction_finished", status="preserved",
+             stop_reason=stop_reason, messages_before=len(ctx.messages),
+             messages_after=len(ctx.messages),
+             duration_ms=round((time.monotonic() - started) * 1000, 3))
+        return False
 
     ctx.messages = [Message(role="user", content=f"[会话画像]\n{summary}")] + recent
+    emit(event_sink, "context_compaction_finished", status="success",
+         stop_reason=stop_reason, messages_before=len(old) + len(recent),
+         messages_after=len(ctx.messages),
+         duration_ms=round((time.monotonic() - started) * 1000, 3))
     return True
 
 

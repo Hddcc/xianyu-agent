@@ -83,6 +83,51 @@ async def test_tool_calls_execute_and_feed_back(patch_llm):
     assert len(ctx.messages) == 4
 
 
+async def test_model_and_tool_execution_emit_structured_events(patch_llm):
+    script = [
+        [{"type": "tool_call", "id": "t1", "name": "echo", "args": {"x": 1}},
+         {"type": "done", "stopReason": "tool_use", "usage": {"total_tokens": 12}}],
+        [{"type": "text_delta", "delta": "完成"},
+         {"type": "done", "stopReason": "end_turn"}],
+    ]
+    patch_llm(FakeLLM(script))
+    events = []
+    tool = make_tool("echo", lambda args, tctx: "ok")
+    signal = CancellationToken()
+    tctx = ToolContext(cancel=signal, emit=events.append)
+
+    await collect(agent_mod.run_agent(make_ctx(), [tool], tctx, signal))
+
+    event_types = [event["type"] for event in events]
+    assert event_types == [
+        "model_call_started", "tool_requested", "model_call_finished",
+        "tool_started", "tool_finished",
+        "model_call_started", "model_call_finished",
+    ]
+    assert events[2]["usage"] == {"total_tokens": 12}
+    assert events[4]["status"] == "success"
+    assert all(event["duration_ms"] >= 0 for event in events
+               if event["type"].endswith("finished"))
+
+
+async def test_error_text_from_tool_is_recorded_as_failure(patch_llm):
+    patch_llm(FakeLLM([[
+        {"type": "tool_call", "id": "t1", "name": "echo", "args": {}},
+        {"type": "done", "stopReason": "tool_use"},
+    ]]))
+    events = []
+    tool = make_tool("echo", lambda args, tctx: "error: unavailable")
+    signal = CancellationToken()
+
+    await collect(agent_mod.run_agent(
+        make_ctx(), [tool], ToolContext(cancel=signal, emit=events.append),
+        signal, max_turns=1))
+
+    finished = next(event for event in events if event["type"] == "tool_finished")
+    assert finished["status"] == "error"
+    assert finished["error"] == "tool_result_error"
+
+
 # ---------------------------------------------------------------- 四种意外
 
 async def test_max_tokens_truncation_skips_tools_and_reprompts(patch_llm):
@@ -144,7 +189,9 @@ async def test_abort_during_execution_pads_pairs(patch_llm):
     tools = [make_tool("first", _first), make_tool("second", _second)]
     ctx = make_ctx()
     signal = CancellationToken()
-    events = await collect(agent_mod.run_agent(ctx, tools, ToolContext(cancel=signal), signal))
+    observed = []
+    events = await collect(agent_mod.run_agent(
+        ctx, tools, ToolContext(cancel=signal, emit=observed.append), signal))
 
     assert last_end(events)["stopReason"] == "aborted"
     # 配对补齐：两个调用都有结果，第二个是 error: aborted
@@ -153,6 +200,9 @@ async def test_abort_during_execution_pads_pairs(patch_llm):
     assert len(results) == 2
     assert results[0].content == "ok"
     assert results[1].is_error and results[1].content == "error: aborted"
+    finished = [event for event in observed if event["type"] == "tool_finished"]
+    assert [(event["tool_call_id"], event["status"]) for event in finished] == [
+        ("t1", "success"), ("t2", "aborted")]
 
 
 async def test_request_error_never_retries(patch_llm):
@@ -230,6 +280,22 @@ async def test_maybe_compact_replaces_old_messages(patch_llm):
     assert ctx.messages[0].content.startswith("[会话画像]")
     # recent 保留的部分不能以孤儿工具结果开头
     assert not agent_mod._is_tool_result(ctx.messages[1])
+
+
+async def test_compaction_emits_before_and_after_counts(patch_llm):
+    patch_llm(FakeLLM([[{"type": "text_delta", "delta": "摘要"},
+                        {"type": "done", "stopReason": "end_turn"}]]))
+    ctx = Context(system_prompt="s",
+                  messages=[Message("user", f"m{i}") for i in range(51)])
+    events = []
+
+    assert await agent_mod.maybe_compact(ctx, None, event_sink=events.append)
+
+    assert [event["type"] for event in events] == [
+        "context_compaction_started", "context_compaction_finished"]
+    assert events[1]["status"] == "success"
+    assert events[1]["messages_before"] == 51
+    assert events[1]["messages_after"] == 21
 
 
 async def test_maybe_compact_skips_when_cancelled(patch_llm):

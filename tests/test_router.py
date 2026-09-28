@@ -21,6 +21,15 @@ def test_price_keyword():
     assert calls == []                     # 规则命中就不问模型
 
 
+def test_decision_explains_rule_match():
+    router, _ = make_router()
+    decision = router.decide("能便宜点吗", "", "")
+    assert decision.intent == "price"
+    assert decision.source == "rule"
+    assert decision.matched_rule == "keyword:便宜"
+    assert decision.duration_ms >= 0
+
+
 def test_price_pattern():
     router, _ = make_router()
     assert router.detect("300元卖不卖", "", "") == "price"
@@ -49,6 +58,31 @@ def test_fallback_classify_default():
     router, calls = make_router("default")
     assert router.detect("在吗", "", "") == "default"
     assert calls == ["在吗"]               # 规则没命中，问了模型
+
+
+def test_decision_explains_model_fallback():
+    from xianyu_agent.router import ClassifierResult, IntentRouter
+
+    router = IntentRouter(lambda *args: ClassifierResult(
+        "default", raw_output="other words", model="classifier",
+        fallback_reason="invalid_output"))
+    decision = router.decide("在吗", "", "")
+    assert decision.intent == "default"
+    assert decision.source == "model"
+    assert decision.raw_output == "other words"
+    assert decision.model == "classifier"
+    assert decision.fallback_reason == "invalid_output"
+
+
+def test_structured_classifier_cannot_return_unknown_intent():
+    from xianyu_agent.router import ClassifierResult, IntentRouter
+
+    decision = IntentRouter(
+        lambda *args: ClassifierResult("unsupported", raw_output="unsupported")
+    ).decide("在吗", "", "")
+
+    assert decision.intent == "default"
+    assert decision.fallback_reason == "invalid_output"
 
 
 def test_fallback_classify_no_reply():

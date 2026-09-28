@@ -132,6 +132,7 @@ async def stream(ctx: Context, tools: list[dict] | None = None, signal=None,
     body = {"model": cfg.name,
             "messages": context_to_provider_messages(ctx),
             "stream": True,
+            "stream_options": {"include_usage": True},
             "temperature": temperature,
             "max_tokens": max_tokens,
             "top_p": top_p}
@@ -145,6 +146,7 @@ async def stream(ctx: Context, tools: list[dict] | None = None, signal=None,
         body["tool_choice"] = tool_choice
 
     finish = None
+    usage = None
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             async with client.stream(
@@ -170,7 +172,11 @@ async def stream(ctx: Context, tools: list[dict] | None = None, signal=None,
                         break
 
                     chunk = json.loads(data)
-                    choice = chunk["choices"][0]
+                    usage = chunk.get("usage") or usage
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
                     delta = choice.get("delta") or {}
 
                     if delta.get("content"):
@@ -200,7 +206,8 @@ async def stream(ctx: Context, tools: list[dict] | None = None, signal=None,
                     yield {"type": "tool_call", "id": buf["id"],
                            "name": buf["name"], "args": args}
 
-                yield {"type": "done", "stopReason": _STOP_MAP.get(finish, "end_turn")}
+                yield {"type": "done", "stopReason": _STOP_MAP.get(finish, "end_turn"),
+                       "usage": usage}
 
     except Exception as e:                      # 网络问题、解析问题，统一变成 error 事件
         yield {"type": "done", "stopReason": "error", "message": str(e)}

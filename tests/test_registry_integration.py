@@ -6,9 +6,101 @@ import pytest
 
 from xianyu_agent import llm
 from xianyu_agent.session import load_latest, session_path
+from xianyu_agent.telemetry import MemoryEventSink
 from xianyu_agent.types import ToolResultBlock, ToolUseBlock
 
 from .integration_support import incoming, make_registry
+
+
+async def test_run_events_share_one_id_and_capture_final_decisions(tmp_path, monkeypatch):
+    sink = MemoryEventSink()
+    registry, sent = make_registry(tmp_path, monkeypatch, event_sink=sink)
+
+    async def stream(ctx, **kwargs):
+        yield {"type": "text_delta", "delta": "正常回复"}
+        yield {"type": "done", "stopReason": "end_turn"}
+
+    monkeypatch.setattr(llm, "stream", stream)
+    run_id = await registry.handle(incoming("c1", "在吗"))
+    events = sink.for_run(run_id)
+
+    assert [event["type"] for event in events] == [
+        "run_started", "route_decided", "agent_started",
+        "model_call_started", "model_call_finished", "agent_finished",
+        "reply_finalized", "message_delivery", "run_finished",
+    ]
+    assert events[1]["source"] == "model"
+    assert events[6]["fallback_used"] is False
+    assert events[7]["status"] == "sent"
+    assert events[-1]["outcome"] == "sent"
+    assert sent == [("c1", "buyer-c1", "正常回复")]
+
+
+async def test_event_sink_failure_does_not_break_reply(tmp_path, monkeypatch):
+    def broken_sink(event):
+        raise OSError("disk unavailable")
+
+    registry, sent = make_registry(tmp_path, monkeypatch, event_sink=broken_sink)
+
+    async def stream(ctx, **kwargs):
+        yield {"type": "text_delta", "delta": "仍然回复"}
+        yield {"type": "done", "stopReason": "end_turn"}
+
+    monkeypatch.setattr(llm, "stream", stream)
+    await registry.handle(incoming("c1", "在吗"))
+    assert sent == [("c1", "buyer-c1", "仍然回复")]
+
+
+async def test_sender_failure_is_recorded_and_propagated(tmp_path, monkeypatch):
+    sink = MemoryEventSink()
+    registry, _ = make_registry(tmp_path, monkeypatch, event_sink=sink)
+
+    async def broken_sender(*args):
+        raise ConnectionError("offline")
+
+    async def stream(ctx, **kwargs):
+        yield {"type": "text_delta", "delta": "待发送"}
+        yield {"type": "done", "stopReason": "end_turn"}
+
+    registry.set_sender(broken_sender)
+    monkeypatch.setattr(llm, "stream", stream)
+    with pytest.raises(ConnectionError):
+        await registry.handle(incoming("c1", "在吗"))
+
+    deliveries = [event for event in sink.events if event["type"] == "message_delivery"]
+    assert deliveries[0]["status"] == "error"
+    assert deliveries[0]["error"] == "ConnectionError"
+    assert sink.events[-1]["type"] == "run_finished"
+    assert sink.events[-1]["outcome"] == "error"
+
+
+async def test_incomplete_idle_profile_preserves_previous_state(tmp_path, monkeypatch):
+    from xianyu_agent import registry as registry_module
+
+    sink = MemoryEventSink()
+    registry, sent = make_registry(
+        tmp_path, monkeypatch, event_sink=sink, idle_compact_hours=0.001)
+    await registry.store.add_message("c1", "buyer-c1", "", "user", "旧消息")
+    monkeypatch.setattr(registry_module.time, "time", lambda: 10**12)
+
+    async def stream(ctx, **kwargs):
+        if ctx.system_prompt == registry_module.SUMMARY_PROMPT:
+            yield {"type": "text_delta", "delta": "不完整画像"}
+            yield {"type": "done", "stopReason": "max_tokens"}
+            return
+        yield {"type": "text_delta", "delta": "正常回复"}
+        yield {"type": "done", "stopReason": "end_turn"}
+
+    monkeypatch.setattr(llm, "stream", stream)
+    run_id = await registry.handle(incoming("c1", "新消息"))
+
+    profile, _ = await registry.store.get_profile("c1")
+    assert profile is None
+    profile_events = [event for event in sink.for_run(run_id)
+                      if event["type"] == "idle_profile_finished"]
+    assert profile_events[0]["status"] == "preserved"
+    assert profile_events[0]["stop_reason"] == "max_tokens"
+    assert sent == [("c1", "buyer-c1", "正常回复")]
 
 
 @pytest.mark.parametrize("sessions", [1, 5, 10, 20])
