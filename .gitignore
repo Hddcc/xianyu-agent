@@ -18,6 +18,8 @@ data/
 # 文档：仓库只保留根目录 README.md
 *.md
 !README.md
+!tools/README.md
+!tools/cookie_sync_extension/README.md
 
 # Python
 __pycache__/

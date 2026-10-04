@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "闲鱼 Cookie 同步",
+  "description": "将当前闲鱼登录 Cookie 安全同步到客服服务。",
+  "version": "0.1.0",
+  "permissions": ["cookies", "storage"],
+  "host_permissions": [
+    "https://*.goofish.com/*"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

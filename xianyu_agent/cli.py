@@ -120,10 +120,39 @@ async def run_live() -> None:
     registry.set_sender(channel.send)          # 发送入口只有这一个
 
     logging.info("启动闲鱼值守（卖家ID: %s）", channel.myid)
+    cookie_sync_server = None
+    cookie_updated = asyncio.Event()
     try:
-        await channel.run()
-    except XianyuCookieError:
-        sys.exit(1)
+        from tools.cookie_sync import configured_server
+
+        loop = asyncio.get_running_loop()
+
+        def apply_synced_cookie(new_cookie: str) -> None:
+            future = asyncio.run_coroutine_threadsafe(
+                channel.replace_cookie(new_cookie), loop)
+            future.result(timeout=30)
+            loop.call_soon_threadsafe(cookie_updated.set)
+
+        cookie_sync_server = configured_server(on_applied=apply_synced_cookie)
+        if cookie_sync_server:
+            cookie_sync_server.start()
+    except Exception:
+        logging.exception("Cookie 同步接口启动失败，继续运行客服")
+
+    try:
+        while True:
+            try:
+                await channel.run()
+            except XianyuCookieError:
+                if not cookie_sync_server:
+                    sys.exit(1)
+                logging.error("Cookie 已失效，保持同步接口在线并等待浏览器更新")
+                if not cookie_updated.is_set():
+                    await cookie_updated.wait()
+                cookie_updated.clear()
+    finally:
+        if cookie_sync_server:
+            cookie_sync_server.stop()
 
 
 def check_cookie() -> None:
