@@ -79,6 +79,29 @@ class XianyuChannel:
 
         self.ws = None
 
+    async def replace_cookie(self, cookies_str: str) -> None:
+        """Apply a newly synchronized Cookie and restart the live connection."""
+        cookies = trans_cookies(cookies_str)
+        if not cookies.get("unb") or not cookies.get("_m_h5_tk"):
+            raise XianyuCookieError("同步的 Cookie 缺少 unb 或 _m_h5_tk")
+
+        self.connection_restart_flag = True
+        if self.ws:
+            await self.ws.close()
+
+        self.cookies_str = cookies_str
+        self.cookies = cookies
+        self.api = XianyuApi(cookies_str)
+        if hasattr(self.dispatcher, "api"):
+            self.dispatcher.api = self.api
+        self.myid = cookies["unb"]
+        if hasattr(self.dispatcher, "config"):
+            self.dispatcher.config.myid = self.myid
+        self.device_id = generate_device_id(self.myid)
+        self.current_token = None
+        self.last_token_refresh_time = 0.0
+        logger.info("Cookie 已更新，准备重新建立闲鱼连接")
+
     # ---------------------------------------------------------------- 连接与运维
 
     async def run(self):

@@ -5,6 +5,7 @@ WORKDIR /app
 COPY pyproject.toml requirements.txt ./
 COPY xianyu_agent ./xianyu_agent
 COPY prompts ./prompts
+COPY tools/__init__.py tools/cookie_sync.py ./tools/
 
 RUN pip install --no-cache-dir -r requirements.txt
 

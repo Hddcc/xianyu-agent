@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+!.env.example
+.pytest_cache
+__pycache__
+*.pyc
+data
+benchmarks
+docs
+tests
+tmp
+tools/cookie_sync_extension

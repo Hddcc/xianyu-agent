@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>闲鱼 Cookie 同步</title>
+  <style>
+    body { width: 280px; margin: 16px; font: 14px sans-serif; }
+    label { display: block; margin: 10px 0 4px; }
+    input { box-sizing: border-box; width: 100%; padding: 7px; }
+    button { width: 100%; margin-top: 14px; padding: 8px; }
+    #status { min-height: 20px; margin-top: 10px; color: #555; }
+  </style>
+</head>
+<body>
+  <label for="server">服务器地址</label>
+  <input id="server" type="url" placeholder="https://你的域名">
+  <label for="token">同步密钥</label>
+  <input id="token" type="password" autocomplete="off">
+  <button id="sync">同步当前 Cookie</button>
+  <div id="status" role="status"></div>
+  <script src="popup.js"></script>
+</body>
+</html>

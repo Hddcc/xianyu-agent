@@ -4,9 +4,11 @@ services:
     container_name: xianyu-agent
     restart: always
     env_file: .env
+    ports:
+      - "${COOKIE_SYNC_BIND_HOST:-127.0.0.1}:${COOKIE_SYNC_PORT:-8765}:${COOKIE_SYNC_PORT:-8765}"
     volumes:
-      - ./data:/app/data        # 对话库 + 会话快照，重启不丢
-      - ./.env:/app/.env:ro     # 配置（Cookie 更新后会自动回写，去掉 :ro 可启用回写）
+      - ./data:/app/data
+      - ./.env:/app/.env
     environment:
       - TZ=Asia/Shanghai
     logging:

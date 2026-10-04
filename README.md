@@ -131,7 +131,19 @@ docker compose logs -f
 
 修改 `.env` 后执行 `docker compose up -d --force-recreate` 以重新加载环境变量；更新代码后执行 `docker compose up -d --build`。
 
-### 6. 运行测试
+### 6. Cookie 一键同步工具
+
+`tools/cookie_sync_extension/` 是一个轻量的 Chrome/Edge 扩展。客服进程配置 `COOKIE_SYNC_TOKEN` 后会启动同步接口；扩展读取当前浏览器中适用于闲鱼网页接口的 Cookie，并在一次点击后上传。客服会备份 `.env`、更新 `COOKIES_STR`、重置旧 token 并自动重连。
+
+服务器端配置一个足够长的随机 `COOKIE_SYNC_TOKEN`，然后重新构建并启动：
+
+```bash
+docker compose up -d --build
+```
+
+在扩展管理页加载 `tools/cookie_sync_extension/`，填写同步接口地址和同步密钥即可。同步接口应通过 HTTPS 或受保护的内网通道访问；不要把未加密的 HTTP 端口直接暴露到公网。同步失败时旧 `.env` 会保持可用，并保留 `.env.cookie-sync.bak` 备份。
+
+### 7. 运行测试
 
 ```bash
 python -m pytest tests/ -q

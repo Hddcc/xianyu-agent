@@ -22,8 +22,9 @@ class XianyuCookieError(Exception):
 
 
 class XianyuApi:
-    def __init__(self, cookies_str: str | None = None):
+    def __init__(self, cookies_str: str | None = None, *, persist_cookies: bool = True):
         self.url = "https://h5api.m.goofish.com/h5/mtop.taobao.idlemessage.pc.login.token/1.0/"
+        self.persist_cookies = persist_cookies
         self.session = requests.Session()
         self.session.headers.update({
             "accept": "application/json",
@@ -63,6 +64,8 @@ class XianyuApi:
 
     def update_env_cookies(self):
         """把当前 cookie 同步写回 .env 的 COOKIES_STR。"""
+        if not self.persist_cookies:
+            return
         try:
             cookie_str = "; ".join(f"{c.name}={c.value}" for c in self.session.cookies)
             env_path = os.path.join(os.getcwd(), ".env")
@@ -195,6 +198,7 @@ class XianyuApi:
                 return self.get_token(device_id, retry_count + 1)
 
             logger.info("Token 获取成功")
+            self._token_attempts = 0
             return res_json
         except XianyuCookieError:
             raise
